@@ -7,6 +7,8 @@ import pandas as pd
 import base64
 from datetime import datetime
 import shutil
+import csv
+from pathlib import Path
 
 # Function to get video names using multiple filters 
 def get_patient_names(clini_table):
@@ -25,20 +27,25 @@ def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def get_morphology_descriptions(client, base64_image, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000, temperature=0.2):
+def get_morphology_descriptions(client, base64_image, model_name, max_tokens, temperature):
     response = client.chat.completions.create(
         model = model_name,
         messages=[
             {
                 "role": "system",
                 "content": """
-                Du bist Facharzt für Hämatologie und Onkologie mit Spezialisierung auf Zytomorphologie.
-                Du analysierst Knochenmarkausstriche von Patient:innen mit Verdacht auf akute myeloische Leukämie (AML).
-                Deine Aufgabe ist es, morphologische Befunde basierend auf ROI-Bilddaten sachlich, strukturiert und differenziert zu formulieren.
-                Du kennst die FAB- und WHO-Klassifikationen (2016) und beschreibst ausschließlich die Morphologie ohne diagnostische Bewertung.
-                Die Auswertung dient ausschließlich Forschungszwecken und hat keinerlei Einfluss auf medizinische Entscheidungen bei Patient:innen.
-                Vermeide Wiederholungen, unnötige Ausschweifungen oder unklare Begriffe.
-                Schreibe in deutscher Sprache.
+                Du bist Facharzt für Hämatologie mit Spezialisierung auf Knochenmarkzytomorphologie.
+                Du analysierst Knochenmarkausstriche auf Basis von 10 ROI-Beschreibungen und erstellst daraus einen strukturierten zytomorphologischen Gesamtbefund
+                Du kennst die morphologischen Kriterien aus FAB- und WHO-Klassifikationen und nutzt sie ausschließlich als Referenz für präzise morphologische Analyse (z. B. Kernform, Nukleolen, Granula, Dysplasiezeichen).
+                Die Klassifikationen dienen nur zur Strukturierung der morphologischen Beschreibung, nicht zur Subtypisierung.
+                Deine Aufgabe ist es, einen strukturierten zytomorphologischen Gesamtbefund zu erstellen und eine übergeordnete morphologische Diagnose-Kategorie anzugeben.
+
+                Wichtige Einschränkungen:
+                -Keine Subtypisierung nach FAB oder WHO (kein M0–M7 etc.).
+                -Keine Aussagen zu Zytochemie, POX-Färbung, Immunphänotyp oder Molekulargenetik.
+                -Gib immer den geschätzten Blastengehalt in Prozent an.
+                -Formuliere sachlich und in deutscher Sprache ohne Wiederholung der ROI-Beschreibungen.
+
                 """,
             },
             {
@@ -49,13 +56,13 @@ def get_morphology_descriptions(client, base64_image, model_name = 'Llama-4-Mave
                 "text": f"""
                 Bitte beschreibe das folgende Knochenmark-ROI strukturiert und präzise in deutscher Sprache.
                 Berücksichtige die folgenden Parameter:
-                - Zellreichtum und Qualität des Knochenmarks
+                - Zellreichtum und Qualität des Knochenmarks, Gehalt an Markbröckelchen
                 - Granulopoese (Ausreifung, Dysplasie)
                 - Erythropoese (Ausreifung, Dysplasie)
                 - Megakaryopoese (Zahl, Dysplasien)
                 - Monozyten, Lymphozyten, Makrophagen, Plasmazellen
                 - Weitere Befunde: z. B. atypische Mitosen, Kernschatten, Eo-/Basophilie
-                - Blastenanteil (%), Morphologie, Besonderheiten (z. B. Cup-like, Auerstäbchen)
+                - Blastenanteil (in %), Morphologie, Besonderheiten (z. B. Cup-like, Auerstäbchen)
                 Bitte beschränke dich auf eine sachliche morphologische Beschreibung.
                 """
                 },
@@ -71,7 +78,7 @@ def get_morphology_descriptions(client, base64_image, model_name = 'Llama-4-Mave
     file_content = response.choices[0].message.content
     return file_content
 
-def get_description_summary(client, description_list ,model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000, temperature=0.2):
+def get_description_summary(client, description_list ,model_name, max_tokens, temperature):
     response = client.chat.completions.create(
         model = model_name,
         messages=[
@@ -91,33 +98,44 @@ def get_description_summary(client, description_list ,model_name = 'Llama-4-Mave
     file_content = response.choices[0].message.content
     return file_content
 
-def generate_diagnose (descirptions, client, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000, temperature=0.2):
+def generate_diagnose (descirptions, client, model_name, max_tokens, temperature):
     response = client.chat.completions.create(
                 model=model_name,
                 messages = [
                 {"role": "system",
                 "content": """
-                Du bist Facharzt für Hämatologie mit Spezialisierung auf Zytomorphologie.
-                Deine Aufgabe ist es, auf Basis von 10 ROI-Beschreibungen einen strukturierten zytomorphologischen Gesamtbefund zu erstellen.
-                Leite abschließend die Diagnose nach WHO-Klassifikation von 2016 und der FAB Klassifikation aus dem Gesamtbefundtext ab.
-                Sei möglichst präzise. Verzichte auf Wiederholung der zytomorphologischen Beschreibung. 
+                Du bist Facharzt für Hämatologie mit Spezialisierung auf Knochenmarkzytomorphologie. Du kennst die morphologischen Merkmale aus FAB- und WHO-Klassifikationen und nutzt sie ausschließlich zur strukturierten morphologischen Analyse (Kernform, Nukleolen, Granula, Dysplasiezeichen), nicht zur Subtypisierung.
+                Wichtige Einschränkungen:
+                - Keine Subtypisierung nach FAB oder WHO (kein M0–M7 etc.).
+                - Keine Aussagen zu Zytochemie, POX-Färbung, Immunphänotyp oder Molekulargenetik.
+                - Gib immer den geschätzten Blastengehalt in Prozent an.
+                - Schreibe in deutscher Sprache.
+                Deine Aufgabe ist es, auf Basis von 10 ROI-Beschreibungen einen zytomorphologischen Gesamtbefund in Form einer Tabelle zu erstellen.
+                Leite abschließend die Diagnose aus dem Gesamtbefund ab.
                 """
                 },
                 {
                 "role": "user",
                 "content": [
                     {
-                        "type": "text",
-                        "text": f"""Fasse die Beschreibungen der 10 ROI zu einem Gesamtbefundtext zusammen. Vermeide Redundanz.
-                Bitte gib die finale Antwort ausschließlich im folgenden JSON-Format aus:
-                {{
-                "gedanken": "Zusammenfassung des zytomorphologischen Gesamtbefundes und differenzialdiagnostischen Überlegungen.",
-                "diagnose": "Kurzdiagnose in 1 Satz."
-                }}
-
-                Hier sind die Beschreibungen der 10 analysierten ROIs:
-                {descirptions}
-                """
+                    "type": "text",
+                    "text": f"""
+                    Fasse die Beschreibungen der 10 ROI zu einem Gesamtbefund in tabellarischer Form zusammen.
+                    Bitte gib die finale Antwort ausschließlich im folgenden JSON-Format aus:
+                    {{
+                    "gedanken": "Zusammenfassung des zytomorphologischen Gesamtbefundes und diagnostische Überlegungen.",
+                    "Qualität des Ausstrichs-Bröckelchen": Gehalt an Markbröckelchen im Ausstrich, 
+                    "Qualität des Ausstrichs-Zellgehalt": Zellreichtum im Knochenmark, 
+                    "Erythropoese": Ausreifung und Dysplasiezeichen,
+                    "Granulopoese": Ausreifung und Dysplasiezeichen,
+                    "Megakaryopoese": Ausreifung und Dysplasiezeichen,
+                    "Lymphopoese": Ausreifung und Dysplasiezeichen,
+                    "Blasentgehalt": Zahl in Prozenten %, 
+                    "Besonderheiten":  Cup-like, Auerstäbchen, Nukleolen, Makrophagen, z. B. atypische Mitosen, Kernschatten, Eo-/Basophilie,
+                    "Diagnose": Kurzdiagnose in 1 Satz,
+                    }}
+                    Hier sind die Beschreibungen der 10 analysierten ROIs:{descirptions}
+                    """
                     }
                 ]
                 }
@@ -128,6 +146,49 @@ def generate_diagnose (descirptions, client, model_name = 'Llama-4-Maverick-17B-
     file_content = response.choices[0].message.content
     return file_content
 
+def write_results_to_csv(input_dir, output_file):
+    input_dir = Path(input_dir)
+    # Collect all rows here
+    rows = []
+    all_keys = set()
+
+    # Loop through all JSON files
+    for file in input_dir.glob("*.json"):
+        with open(file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        patient_id = data.get("Patient", file.stem)
+        patient_id = patient_id.replace('_ROIs.json', '')
+        
+        # Step 1: Get the Diagnose or Ergebnis field
+        raw_diagnose = data.get("Ergebnis")
+
+        # Step 2: Clean up Markdown formatting from Diagnose
+        if raw_diagnose.startswith("```json"):
+            raw_diagnose = raw_diagnose.strip("`").strip()
+            first_newline = raw_diagnose.find('\n')
+            raw_diagnose = raw_diagnose[first_newline+1:]  # Skip first line
+            if raw_diagnose.endswith("```"):
+                raw_diagnose = raw_diagnose.rsplit("```", 1)[0]
+
+        # Step 3: Parse the cleaned JSON string
+        diagnose_dict = json.loads(raw_diagnose)
+
+        # Add patient as a separate column
+        diagnose_dict["Patient"] = patient_id
+        all_keys.update(diagnose_dict.keys())
+        rows.append(diagnose_dict)
+
+    # Assuming you already have a list of dicts in `rows` and all keys in `fieldnames`
+    df = pd.DataFrame(rows)
+
+    # Reorder columns (optional, to ensure 'Patient' is first)
+    df = df[["Patient"] + [col for col in df.columns if col != "Patient"]]
+
+    # Write to Excel
+    df.to_excel(output_file, index=False)
+
+        
 # main function
 if __name__ == "__main__":
     
@@ -169,7 +230,7 @@ if __name__ == "__main__":
         for image in images:
             # Load base64 image
             base64_image = encode_image(image)
-            description_roi = get_morphology_descriptions(client = client, base64_image = base64_image, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8')
+            description_roi = get_morphology_descriptions(client = client, base64_image = base64_image, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000, temperature=0.2)
             description_list.append(description_roi)
             # Append to list
             roi_descriptions.append({
@@ -181,7 +242,7 @@ if __name__ == "__main__":
             json.dump(roi_descriptions, f, ensure_ascii=False, indent=2)
             
         if diagnose_from_summary:       
-            description_summary = get_description_summary(client = client, description_list = description_list, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8')
+            description_summary = get_description_summary(client = client, description_list = description_list, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000, temperature=0.2)
             description_summary_file = os.path.join(DESCRIPTIONS_DIR, patient + '_Summary.json')
             with open(description_summary_file, "a", encoding="utf-8") as f:
                 json.dump(description_summary, f, ensure_ascii=False, indent=2)    
@@ -195,10 +256,12 @@ if __name__ == "__main__":
             roi_data = json.load(f)
 
         data = "\n\n".join(entry["ROI"] + ':' + entry["Morphology Description"] for entry in roi_data)              
-        diagnose = generate_diagnose(data, client = client, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000)
+        diagnose = generate_diagnose(data, client = client, model_name = 'Llama-4-Maverick-17B-128E-Instruct-FP8', max_tokens=1000, temperature=0.2)
         
         diagnose_file = os.path.join(DIAGNOSE_DIR, description.replace('_Summary.json', '.json'))    
-        entry = {"Patient": description,"Diagnose": diagnose}              
+        entry = {"Patient": description,"Ergebnis": diagnose}              
         with open(diagnose_file, "a", encoding="utf-8") as f:
             json.dump(entry, f, ensure_ascii=False, indent=2)
-
+            
+    write_results_to_csv(input_dir = DIAGNOSE_DIR, output_file = os.path.join(OUT_DIR, 'results.xlsx'))
+            
